@@ -1,5 +1,4 @@
 from random import Random, randint
-from pathlib import Path
 import asyncio
 import hashlib
 import threading
@@ -134,7 +133,7 @@ if __name__ == "__main__":
         target=run_initiator, args=("http://localhost:7071/tunnel", "localhost:7076")
     )
     acceptor_thread.start()
-    time.sleep(2)
+    time.sleep(3)
     initiator_thread.start()
 
     srv(7076)
