@@ -24,6 +24,7 @@ class WebRequestData:
     method: str
     url: str
     headers: CIMultiDict[str]
+    is_websocket: bool
 
 
 @dataclass
