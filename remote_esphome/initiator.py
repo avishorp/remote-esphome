@@ -1,6 +1,7 @@
-from typing import Callable, Coroutine
+from typing import Callable, Coroutine, Any
 from urllib.parse import urlparse, urlunparse
 from dataclasses import dataclass
+from functools import partial
 import asyncio
 import pickle
 import logging
@@ -29,8 +30,22 @@ class TunnelInitiator:
             int, tuple[asyncio.Queue[bytes | Exception], asyncio.Task]
         ] = {}
         self._outbound_queue = asyncio.Queue[tuple[int, bytes]]()
+        self._srv_task: asyncio.Task | None = None
 
     async def start(self):
+        self._srv_task = asyncio.create_task(self._start())
+
+    async def stop(self):
+        assert self._srv_task is not None
+        self._srv_task.cancel()
+
+    async def __aenter__(self):
+        await self.start()
+
+    async def __aexit__(self, exc_type: Any, exc_value: Any, exc_tb: Any):
+        await self.stop()
+
+    async def _start(self):
         _logger.info("Starting tunnel initiator")
         _logger.info(f"Trying to connect {self._url}")
         send_task = None
@@ -52,11 +67,9 @@ class TunnelInitiator:
                     send_task = asyncio.create_task(sender())
 
                     async for msg in ws:
-
                         if msg.type == WSMsgType.BINARY:
                             # Parse the header
                             channel_num, body = parse_header(msg.data)
-
                             channel_queue, _ = self._active_channels.get(
                                 channel_num, (None, None)
                             )
@@ -70,11 +83,17 @@ class TunnelInitiator:
                                 channel_queue = asyncio.Queue[bytes | Exception]()
                                 await channel_queue.put(body)
 
-                                async def _send(data: bytes):
+                                async def _send(
+                                    channel_num: int,
+                                    chan_logger: logging.Logger,
+                                    data: bytes,
+                                ):
                                     chan_logger.debug(f"Sending data (len={len(data)})")
                                     await self._outbound_queue.put((channel_num, data))
 
-                                async def _recv():
+                                async def _recv(
+                                    channel_num: int, chan_logger: logging.Logger
+                                ):
                                     data = await self._active_channels[channel_num][
                                         0
                                     ].get()
@@ -96,9 +115,13 @@ class TunnelInitiator:
 
                                         return data
 
-                                channel = Channel(_send, _recv, chan_logger)
+                                channel = Channel(
+                                    partial(_send, channel_num, chan_logger),
+                                    partial(_recv, channel_num, chan_logger),
+                                    chan_logger,
+                                )
 
-                                async def _new_channel_task():
+                                async def _new_channel_task(channel_num: int):
                                     try:
                                         await self._handle_new_channel(channel)
                                     except Exception as exc:
@@ -109,7 +132,7 @@ class TunnelInitiator:
 
                                 self._active_channels[channel_num] = (
                                     channel_queue,
-                                    asyncio.create_task(_new_channel_task()),
+                                    asyncio.create_task(_new_channel_task(channel_num)),
                                 )
 
                             else:
@@ -257,5 +280,9 @@ class TunnelInitiator:
 
 
 def run_initiator(target_url: str, rewrite_host: str | None = None):
-    tunnel = TunnelInitiator(target_url, rewrite_host)
-    asyncio.run(tunnel.start())
+    async def _runner():
+        async with TunnelInitiator(target_url, rewrite_host):
+            while True:
+                await asyncio.sleep(3600)
+
+    asyncio.run(_runner())

@@ -1,4 +1,4 @@
-from typing import Callable, Coroutine
+from typing import Callable, Coroutine, Any
 from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -32,7 +32,7 @@ class Channel:
 
 
 class TunnelAcceptor:
-    def __init__(self, tunnel_port: int, proxy_port: int):
+    def __init__(self, tunnel_port: int, proxy_port: int, on_connect: Callable[[], Coroutine[None, None, None]] | None = None):
         self._tunnel_port = tunnel_port
         self._proxy_port = proxy_port
         self._client_lock = asyncio.Lock()
@@ -41,8 +41,23 @@ class TunnelAcceptor:
         self._outbound_queue: _OutboundDataQueue | None = None
         self._active_channels = dict[int, asyncio.Queue[bytes | Exception]]()
         self._last_channel_num = 0
+        self._srv_task: asyncio.Task | None = None
+        self._on_connect = on_connect
 
     async def start(self):
+        self._srv_task = asyncio.create_task(self._start())
+
+    async def stop(self):
+        assert self._srv_task is not None
+        self._srv_task.cancel()
+
+    async def __aenter__(self):
+        await self.start()
+
+    async def __aexit__(self, exc_type: Any, exc_value: Any, exc_tb: Any):
+        await self.stop()
+        
+    async def _start(self):
         await asyncio.wait(
             [
                 asyncio.create_task(self._start_tunnel_server()),
@@ -50,10 +65,6 @@ class TunnelAcceptor:
             ],
             return_when=asyncio.FIRST_COMPLETED,
         )
-
-        # Wait forever
-        while True:
-            await asyncio.sleep(3600)
 
     async def _start_tunnel_server(self):
         app = web.Application()
@@ -96,6 +107,9 @@ class TunnelAcceptor:
             ws = web.WebSocketResponse()
             self._ws = ws
             await ws.prepare(request)
+            
+            if self._on_connect is not None:
+                await self._on_connect()
 
             # Create an outbound queue
             self._outbound_queue = asyncio.Queue[tuple[int, bytes]]()
@@ -331,7 +345,8 @@ class TunnelAcceptor:
 
 def run_acceptor(tunnel_port: int, proxy_port: int):
     async def _runner():
-        tunnel = TunnelAcceptor(tunnel_port, proxy_port)
-        await tunnel.start()
+        async with TunnelAcceptor(tunnel_port, proxy_port):
+            while True:
+                await asyncio.sleep(3600)
 
     asyncio.run(_runner())
