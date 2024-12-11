@@ -32,7 +32,12 @@ class Channel:
 
 
 class TunnelAcceptor:
-    def __init__(self, tunnel_port: int, proxy_port: int, on_connect: Callable[[], Coroutine[None, None, None]] | None = None):
+    def __init__(
+        self,
+        tunnel_port: int,
+        proxy_port: int,
+        on_connect: Callable[[], Coroutine[None, None, None]] | None = None,
+    ):
         self._tunnel_port = tunnel_port
         self._proxy_port = proxy_port
         self._client_lock = asyncio.Lock()
@@ -56,7 +61,7 @@ class TunnelAcceptor:
 
     async def __aexit__(self, exc_type: Any, exc_value: Any, exc_tb: Any):
         await self.stop()
-        
+
     async def _start(self):
         await asyncio.wait(
             [
@@ -87,7 +92,7 @@ class TunnelAcceptor:
         )
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "localhost", self._proxy_port)
+        site = web.TCPSite(runner, None, self._proxy_port)
         self._proxy_logger.info(f"Accepting web requests on port {self._proxy_port}")
         await site.start()
 
@@ -107,7 +112,7 @@ class TunnelAcceptor:
             ws = web.WebSocketResponse()
             self._ws = ws
             await ws.prepare(request)
-            
+
             if self._on_connect is not None:
                 await self._on_connect()
 
@@ -208,7 +213,7 @@ class TunnelAcceptor:
             request.headers.get("Upgrade", "").lower() == "websocket"
             and request.headers.get("Connection", "").lower() == "upgrade"
         )
-        resp = web.WebSocketResponse() if is_websocket else web.StreamResponse()
+        logging.info(f"[{request.method}] {request.url}")
 
         try:
             async with self._create_channel() as channel:
@@ -226,27 +231,20 @@ class TunnelAcceptor:
                 await channel.send(pickle.dumps(request_data))
                 channel.logger.debug(f"Request object sent for url={request.url}")
 
-                # Wait for the response header
-                resp_header_raw = await channel.recv()
                 try:
-                    resp_header = pickle.loads(resp_header_raw)
-                    if not isinstance(resp_header, WebResponseData):
-                        self._proxy_logger.error("Unexpected response from remote side")
-                        return resp
-
                     if is_websocket:
-                        assert isinstance(resp, web.WebSocketResponse)
+                        # Wait for the response header
+                        resp_header_raw = await channel.recv()
+                        resp_header = pickle.loads(resp_header_raw)
+                        if not isinstance(resp_header, WebResponseData):
+                            self._proxy_logger.error("Unexpected response from remote side")
+                            raise web.HTTPInternalServerError()
+                        
+                        resp = web.WebSocketResponse()
                         await resp.prepare(request)
                         await self._relay_websocket(channel, resp)
                     else:
-                        resp.set_status(resp_header.status)
-                        resp.headers.add("X-Tunnel-Up", "true")
-                        for k, v in resp_header.headers.items():
-                            channel.logger.debug(f"< {k}: {v}")
-                            resp.headers.add(k, v)
-                        await resp.prepare(request)
-
-                        await self._relay_plain_body(channel, request, resp)
+                        return await self._relay_plain_body(channel, request)
 
                     # Let the remote side know that the client has been closed
                     await channel.send(b"")
@@ -260,6 +258,7 @@ class TunnelAcceptor:
         except TunnelDownException:
             # When the tunnel is down, fallback to a static predefined
             # content
+            resp = web.StreamResponse()
             resp.headers.add("X-Tunnel-Up", "false")
             await resp.prepare(request)
             await resp.write("Tunnel is down".encode())
@@ -270,9 +269,9 @@ class TunnelAcceptor:
         return resp
 
     async def _relay_plain_body(
-        self, channel: Channel, request: web.Request, response: web.StreamResponse
+        self, channel: Channel, request: web.Request
     ):
-        async def client_to_tunnel():
+        async def request_data_to_tunnel():
             # Stream request data to the tunnel
             try:
                 while True:
@@ -282,28 +281,39 @@ class TunnelAcceptor:
                     await channel.send(chunk)
             except (ConnectionAbortedError, ConnectionResetError):
                 pass
+            finally:
+                await channel.send(b"")
+            
+        request_data_task = asyncio.create_task(request_data_to_tunnel())
 
-        async def tunnel_to_client():
-            # Stream response data from the tunnel to the client
-            try:
-                while True:
-                    data = await channel.recv()
-                    if len(data) == 0:
-                        break
-                    await response.write(data)
+        resp_header_raw = await channel.recv()
+        resp_header = pickle.loads(resp_header_raw)
+        if not isinstance(resp_header, WebResponseData):
+            self._proxy_logger.error("Unexpected response from remote side")
+            raise web.HTTPInternalServerError()
+        
+        resp = web.StreamResponse()
+        resp.set_status(resp_header.status)
+        resp.headers.add("X-Tunnel-Up", "true")
+        for k, v in resp_header.headers.items():
+            channel.logger.debug(f"< {k}: {v}")
+            resp.headers.add(k, v)
+        await resp.prepare(request)
 
-            except (ConnectionAbortedError, ConnectionResetError):
-                pass
+        # Stream response data from the tunnel to the client
+        try:
+            while True:
+                data = await channel.recv()
+                if len(data) == 0:
+                    break
+                await resp.write(data)
 
-        # Create tasks to pass the data between the tunnel and the client
-        await asyncio.wait(
-            [
-                asyncio.create_task(client_to_tunnel()),
-                asyncio.create_task(tunnel_to_client()),
-            ],
-            return_when=asyncio.ALL_COMPLETED,
-        )
-        pass
+        except (ConnectionAbortedError, ConnectionResetError):
+            pass
+        
+        await request_data_task
+        return resp
+
 
     async def _relay_websocket(self, channel: Channel, ws: web.WebSocketResponse):
         async def client_to_tunnel():
@@ -343,10 +353,7 @@ class TunnelAcceptor:
         )
 
 
-def run_acceptor(tunnel_port: int, proxy_port: int):
-    async def _runner():
-        async with TunnelAcceptor(tunnel_port, proxy_port):
-            while True:
-                await asyncio.sleep(3600)
-
-    asyncio.run(_runner())
+async def run_acceptor(tunnel_port: int, proxy_port: int) -> None:
+    async with TunnelAcceptor(tunnel_port, proxy_port):
+        while True:
+            await asyncio.sleep(3600)

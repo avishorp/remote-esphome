@@ -18,12 +18,14 @@ aiohttp = ">=3.10"
 
 [project.optional-dependencies]
 test = ["pytest"]
+qa = ["ruff"]
 
 [tool.setuptools.package-dir]
 remote_esphome = "remote_esphome"
 
-[tools.pytest]
-auto_asyncio = true
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["D100", "D101", "D102", "D105", "D107", "S101", "G004"]
 
-[tool.flake8]
-max-line-length=120
+[tool.ruff]
+line-length = 120

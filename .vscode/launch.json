@@ -15,8 +15,9 @@
             "name": "Initiator",
             "type": "debugpy",
             "request": "launch",
-            "module": "esphome_tunnel",
-            "args": ["initiator"]
+            "module": "remote_esphome",
+            "args": ["initiator"],
+            "cwd": "${workspaceFolder}/remote-esphome"
         },
         {
             "name": "Manual Test",
