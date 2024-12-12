@@ -323,12 +323,15 @@ async def run_initiator(target_url: str) -> None:
                         str(esphome_port),
                         esphome_dir,
                     )
-                    # await asyncio.wait([esphome_proc.wait(), esphome_finished], return_when=asyncio.FIRST_COMPLETED)
-                    await esphome_proc.wait()
-                    if esphome_proc.returncode != 0:
-                        raise RuntimeError(
-                            f"ESPHome terminated with non-zero ({esphome_proc.returncode}) exit code"
-                        )
+                    esphome_proc_task = asyncio.create_task(esphome_proc.wait())
+                    _, pending = await asyncio.wait([esphome_proc_task, esphome_finished], return_when=asyncio.FIRST_COMPLETED)
+
+                    if esphome_proc_task in pending:
+                        esphome_proc.kill()
+                    elif esphome_proc.returncode != 0:
+                            raise RuntimeError(
+                                f"ESPHome terminated with non-zero ({esphome_proc.returncode}) exit code"
+                            )
 
         except Exception as exc:
             logging.error(f"Terminated with exception: {exc!s}")
