@@ -1,16 +1,22 @@
 import asyncio
+import hashlib
+import http
 import logging
+import os
 import pickle
 import sys
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
+from typing import cast
 from urllib.parse import urlparse, urlunparse
-from tempfile import TemporaryDirectory
 
 from aiohttp import ClientSession, WSMsgType
+from aiohttp import request as aiohttp_request
 from multidict import CIMultiDict
 
+from .file_sync_service import FileSyncService
 from .header import WebRequestData, WebResponseData, encode_header, parse_header
 
 _logger = logging.getLogger("initiator")
@@ -183,7 +189,7 @@ class TunnelInitiator:
             request_data_raw = await channel.recv()
             if len(request_data_raw) == 0:
                 return
-            request_data = pickle.loads(request_data_raw)
+            request_data = pickle.loads(request_data_raw)  # noqa: S301
             if not isinstance(request_data, WebRequestData):
                 raise ValueError("Expected request data, but got something else")
 
@@ -193,7 +199,8 @@ class TunnelInitiator:
                 await self._handle_plain_channel(request_data, channel)
 
         except (pickle.UnpicklingError, ValueError) as exc:
-            channel.logger.error(f"Request aborted: {exc}")
+            msg = f"Request aborted: {exc}"
+            channel.logger.error(msg)
 
         except ConnectionAbortedError:
             pass
@@ -305,36 +312,42 @@ class TunnelInitiator:
             return url
 
 
-async def run_initiator(target_url: str) -> None:
+async def run_initiator(target_url: str, workdir: Path) -> None:
     while True:
         esphome_port = 23411
         try:
-            with TemporaryDirectory() as esphome_dir:
-                logging.debug(f"Using {esphome_dir} as ESPHome dashbord config dir")
-                async with TunnelInitiator(target_url, f"localhost:{esphome_port}") as esphome_finished:
+            esphome_dir = workdir / "esphome"
+            logging.info(f"Using {esphome_dir} as ESPHome dashbord config dir")
+            async with (
+                TunnelInitiator(
+                    target_url + "/tunnel", f"localhost:{esphome_port}"
+                ) as esphome_finished,
+                FileSyncService(esphome_dir, target_url),
+            ):
+                # Run ESPHome
+                esphome_proc = await asyncio.subprocess.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "esphome",
+                    "dashboard",
+                    "--port",
+                    str(esphome_port),
+                    esphome_dir,
+                )
+                esphome_proc_task = asyncio.create_task(esphome_proc.wait())
+                _, pending = await asyncio.wait(
+                    [esphome_proc_task, esphome_finished],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-                    # Run ESPHome
-                    esphome_proc = await asyncio.subprocess.create_subprocess_exec(
-                        sys.executable,
-                        "-m",
-                        "esphome",
-                        "dashboard",
-                        "--port",
-                        str(esphome_port),
-                        esphome_dir,
-                    )
-                    esphome_proc_task = asyncio.create_task(esphome_proc.wait())
-                    _, pending = await asyncio.wait([esphome_proc_task, esphome_finished], return_when=asyncio.FIRST_COMPLETED)
-
-                    if esphome_proc_task in pending:
-                        esphome_proc.kill()
-                    elif esphome_proc.returncode != 0:
-                            raise RuntimeError(
-                                f"ESPHome terminated with non-zero ({esphome_proc.returncode}) exit code"
-                            )
+                if esphome_proc_task in pending:
+                    esphome_proc.kill()
+                elif esphome_proc.returncode != 0:
+                    msg = f"ESPHome terminated with non-zero ({esphome_proc.returncode}) exit code"
+                    raise RuntimeError(msg)
 
         except Exception as exc:
-            logging.error(f"Terminated with exception: {exc!s}")
+            logging.exception(f"Terminated with exception: {exc!s}")
 
         logging.info("Waiting 10 seconds before retrying")
         await asyncio.sleep(10)

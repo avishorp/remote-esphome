@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import logging
 import asyncio
 import pickle
+import http
+import hashlib
 
 from aiohttp import web, WSMsgType, WSMessage
 
@@ -36,6 +38,7 @@ class TunnelAcceptor:
         self,
         tunnel_port: int,
         proxy_port: int,
+        state_dir: Path,
         on_connect: Callable[[], Coroutine[None, None, None]] | None = None,
     ):
         self._tunnel_port = tunnel_port
@@ -48,6 +51,8 @@ class TunnelAcceptor:
         self._last_channel_num = 0
         self._srv_task: asyncio.Task | None = None
         self._on_connect = on_connect
+        self._state_dir = state_dir
+        self._esphome_dir = state_dir / "esphome"
 
     async def start(self):
         self._srv_task = asyncio.create_task(self._start())
@@ -59,10 +64,10 @@ class TunnelAcceptor:
     async def __aenter__(self):
         await self.start()
 
-    async def __aexit__(self, exc_type: Any, exc_value: Any, exc_tb: Any):
+    async def __aexit__(self, exc_type: Any, exc_value: Any, exc_tb: Any) -> None:
         await self.stop()
 
-    async def _start(self):
+    async def _start(self) -> None:
         await asyncio.wait(
             [
                 asyncio.create_task(self._start_tunnel_server()),
@@ -71,9 +76,15 @@ class TunnelAcceptor:
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-    async def _start_tunnel_server(self):
+    async def _start_tunnel_server(self) -> None:
         app = web.Application()
-        app.add_routes([web.get("/tunnel", self._handle_tunnel_connect)])
+        app.add_routes(
+            [
+                web.get("/tunnel", self._handle_tunnel_connect),
+                web.get("/state", self._handle_get_state),
+                web.post("/state", self._handle_post_state),
+            ],
+        )
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, None, self._tunnel_port)
@@ -237,9 +248,11 @@ class TunnelAcceptor:
                         resp_header_raw = await channel.recv()
                         resp_header = pickle.loads(resp_header_raw)
                         if not isinstance(resp_header, WebResponseData):
-                            self._proxy_logger.error("Unexpected response from remote side")
+                            self._proxy_logger.error(
+                                "Unexpected response from remote side"
+                            )
                             raise web.HTTPInternalServerError()
-                        
+
                         resp = web.WebSocketResponse()
                         await resp.prepare(request)
                         await self._relay_websocket(channel, resp)
@@ -268,9 +281,7 @@ class TunnelAcceptor:
 
         return resp
 
-    async def _relay_plain_body(
-        self, channel: Channel, request: web.Request
-    ):
+    async def _relay_plain_body(self, channel: Channel, request: web.Request):
         async def request_data_to_tunnel():
             # Stream request data to the tunnel
             try:
@@ -283,7 +294,7 @@ class TunnelAcceptor:
                 pass
             finally:
                 await channel.send(b"")
-            
+
         request_data_task = asyncio.create_task(request_data_to_tunnel())
 
         resp_header_raw = await channel.recv()
@@ -291,7 +302,7 @@ class TunnelAcceptor:
         if not isinstance(resp_header, WebResponseData):
             self._proxy_logger.error("Unexpected response from remote side")
             raise web.HTTPInternalServerError()
-        
+
         resp = web.StreamResponse()
         resp.set_status(resp_header.status)
         resp.headers.add("X-Tunnel-Up", "true")
@@ -310,10 +321,9 @@ class TunnelAcceptor:
 
         except (ConnectionAbortedError, ConnectionResetError):
             pass
-        
+
         await request_data_task
         return resp
-
 
     async def _relay_websocket(self, channel: Channel, ws: web.WebSocketResponse):
         async def client_to_tunnel():
@@ -352,8 +362,69 @@ class TunnelAcceptor:
             return_when=asyncio.ALL_COMPLETED,
         )
 
+    async def _handle_get_state(self, request: web.Request) -> web.StreamResponse:
+        """Get a file from the working directory, or a list of files."""
 
-async def run_acceptor(tunnel_port: int, proxy_port: int) -> None:
-    async with TunnelAcceptor(tunnel_port, proxy_port):
+        def build_file_list(data_dir: Path) -> list[dict]:
+            return [
+                {
+                    "name": str(fn.relative_to(data_dir)),
+                    "size": fn.stat().st_size,
+                    "checksum": hashlib.md5(fn.read_bytes()).hexdigest(),  # noqa: S324
+                }
+                for fn in data_dir.rglob("*")
+                if fn.is_file()
+            ]
+
+        data_dir = self._state_dir / "esphome"
+        filename = request.query.get("dl")
+
+        if filename:
+            # Download the file
+            if filename.startswith("/"):
+                raise web.HTTPBadRequest(text="Filename must be relative")
+            download_file = data_dir / filename
+            if download_file.exists():
+                logging.info(f"Remote downloads {download_file}")
+                return web.Response(body=download_file.read_bytes())
+
+            raise web.HTTPNotFound
+
+        # Return a list of all the files (recursively)
+        logging.info("Remote asks for file list")
+        if not data_dir.exists():
+            file_list = []
+        else:
+            file_list = await asyncio.get_event_loop().run_in_executor(
+                None, build_file_list, data_dir
+            )
+        return web.json_response({"files": file_list})
+
+    async def _handle_post_state(self, request: web.Request) -> web.StreamResponse:
+        """Write a file into the working directory."""
+        data = await request.post()
+
+        file_to_upload = data.get("file")
+        if not file_to_upload or not isinstance(file_to_upload, web.FileField):
+            raise web.HTTPBadRequest(text="file field missing or incorrect type")
+        filename_field = data.get("filename")
+        if not filename_field or not isinstance(filename_field, str):
+            raise web.HTTPBadRequest(text="filename field missing")
+        target_filename = (self._esphome_dir / filename_field).absolute()
+        if not target_filename.is_relative_to(self._esphome_dir.absolute()):
+            raise web.HTTPBadRequest(text="Can only upload files to work dir")
+
+        logging.info(f"Uploading to {filename_field}")
+        target_path = target_filename.parent
+        if not target_path.exists():
+            target_path.mkdir(parents=True)
+
+        target_filename.write_bytes(file_to_upload.file.read())
+
+        return web.Response(status=http.HTTPStatus.NO_CONTENT)
+
+
+async def run_acceptor(tunnel_port: int, proxy_port: int, workdir: Path) -> None:
+    async with TunnelAcceptor(tunnel_port, proxy_port, workdir):
         while True:
             await asyncio.sleep(3600)
