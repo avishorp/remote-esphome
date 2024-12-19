@@ -1,19 +1,15 @@
 import asyncio
-import hashlib
-import http
 import logging
-import os
 import pickle
+import re
 import sys
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import cast
 from urllib.parse import urlparse, urlunparse
 
 from aiohttp import ClientSession, WSMsgType
-from aiohttp import request as aiohttp_request
 from multidict import CIMultiDict
 
 from .file_sync_service import FileSyncService
@@ -272,15 +268,15 @@ class TunnelInitiator:
             headers=request_data.headers,
         ) as resp:
 
-            async def server_to_tunnel():
+            async def server_to_tunnel() -> None:
                 async for msg in resp:
                     if len(msg.data) == 0:
                         break
                     await channel.send(pickle.dumps(msg))
 
-            async def tunnel_to_server():
+            async def tunnel_to_server() -> None:
                 while True:
-                    msg = pickle.loads(await channel.recv())
+                    msg = pickle.loads(await channel.recv())  # noqa: S301
                     match msg.type:
                         case WSMsgType.BINARY:
                             await resp.send_bytes(msg.data)
@@ -322,7 +318,7 @@ async def run_initiator(target_url: str, workdir: Path) -> None:
                 TunnelInitiator(
                     target_url + "/tunnel", f"localhost:{esphome_port}"
                 ) as esphome_finished,
-                FileSyncService(esphome_dir, target_url),
+                FileSyncService(esphome_dir, target_url, re.compile(r"\.esphome/build/.*")),
             ):
                 # Run ESPHome
                 esphome_proc = await asyncio.subprocess.create_subprocess_exec(

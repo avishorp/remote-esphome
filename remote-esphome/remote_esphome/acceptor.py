@@ -1,17 +1,17 @@
-from typing import Callable, Coroutine, Any
-from pathlib import Path
+import asyncio
+import hashlib
+import http
+import logging
+import pickle
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-import logging
-import asyncio
-import pickle
-import http
-import hashlib
+from pathlib import Path
+from typing import Any, Callable, Coroutine
 
-from aiohttp import web, WSMsgType, WSMessage
+from aiohttp import WSMessage, WSMsgType, web
 
-from .header import parse_header, encode_header, WebRequestData, WebResponseData
-
+from .header import WebRequestData, WebResponseData, encode_header, parse_header
 
 PROXY_PORT = 6052
 TUNNEL_PORT = 7070
