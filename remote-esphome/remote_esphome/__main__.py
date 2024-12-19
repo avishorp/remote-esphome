@@ -10,19 +10,24 @@ logging.basicConfig(level=logging.INFO, format="%(name)s [%(levelname)s]: %(mess
 
 
 _USAGE = """
-python3 -m remote_esphome acceptor <tunnel_port> <proxy_port>
+python3 -m remote_esphome addon <tunnel_port> <proxy_port> <working dir>
 
   - or -
 
-python3 -m remote_esphome initiator <acceptor URL> <ESPHome Dashboard Dir>
+python3 -m remote_esphome worker <acceptor URL> <working dir>
 """
 
 
 async def _amain() -> None:
-    if sys.argv[1] == "acceptor":
-        await run_acceptor(7071, 7072, Path("acceptor_workdir"))
-    elif sys.argv[1] == "initiator":
-        await run_initiator(sys.argv[2], Path("initiator_workdir"))
+    if sys.argv[1] == "addon":
+        tunnel_port = int(sys.argv[2])
+        proxy_port = int(sys.argv[3])
+        workdir = Path(sys.argv[4])
+        await run_acceptor(tunnel_port, proxy_port, workdir)
+    elif sys.argv[1] == "worker":
+        addon_url = sys.argv[2]
+        workdir = Path(sys.argv[3])
+        await run_initiator(addon_url, workdir)
 
 
 if __name__ == "__main__":

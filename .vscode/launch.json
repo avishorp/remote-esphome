@@ -5,18 +5,19 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Acceptor",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "esphome_tunnel",
-            "args": ["acceptor"]
-        },
-        {
-            "name": "Initiator",
+            "name": "Addon",
             "type": "debugpy",
             "request": "launch",
             "module": "remote_esphome",
-            "args": ["initiator"],
+            "args": ["addon", "7071", "7072", "acceptor_workdir"],
+            "cwd": "${workspaceFolder}/remote-esphome"
+        },
+        {
+            "name": "Worker",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "remote_esphome",
+            "args": ["worker", "http://localhost:7071", "initiator_workdir"],
             "cwd": "${workspaceFolder}/remote-esphome"
         },
         {
