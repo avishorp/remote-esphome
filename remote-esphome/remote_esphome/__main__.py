@@ -14,7 +14,7 @@ python3 -m remote_esphome addon <tunnel_port> <proxy_port> <working dir>
 
   - or -
 
-python3 -m remote_esphome worker <acceptor URL> <working dir>
+python3 -m remote_esphome worker <working dir> <acceptor URL>
 """
 
 
@@ -25,8 +25,8 @@ async def _amain() -> None:
         workdir = Path(sys.argv[4])
         await run_acceptor(tunnel_port, proxy_port, workdir)
     elif sys.argv[1] == "worker":
-        addon_url = sys.argv[2]
-        workdir = Path(sys.argv[3])
+        addon_url = sys.argv[3]
+        workdir = Path(sys.argv[2])
         await run_initiator(addon_url, workdir)
 
 

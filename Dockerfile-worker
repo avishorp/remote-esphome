@@ -1,0 +1,15 @@
+FROM debian:12.2-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    iputils-ping \
+    python3-pip
+RUN --mount=type=bind,source=remote-esphome,target=/tmp/remote-esphome-src \
+    mkdir -p /tmp/remote-esphome && \
+    cp -r /tmp/remote-esphome-src/* /tmp/remote-esphome && \
+    pip3 install --break-system-packages --no-cache /tmp/remote-esphome && \
+    rm -fr /tmp/remote-esphome
+RUN pip3 install --break-system-packages --no-cache esphome
+
+RUN mkdir -p /var/run/remote_esphome
+ENTRYPOINT [ "/usr/bin/python3", "-m", "remote_esphome", "worker", "/var/run/remote_esphome" ]

@@ -11,7 +11,7 @@ authors = [
 version = "0.1.0"
 description = "Remote ESPHome addon for Home Assistant"
 license = {text = "MIT License"}
-requires-python = ">= 3.12"
+requires-python = ">= 3.11"
 dependencies = [
     "aiohttp >= 3.10"
 ]
@@ -22,6 +22,11 @@ qa = ["ruff"]
 
 [tool.setuptools.package-dir]
 remote_esphome = "remote_esphome"
+
+[tool.setuptools.package-data]
+"remote_esphome" = [
+    "static/*"
+    ]
 
 [tool.ruff.lint]
 select = ["ALL"]
