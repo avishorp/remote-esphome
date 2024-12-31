@@ -1,9 +1,7 @@
 import asyncio
 import hashlib
 import http
-import logging
 import pickle
-import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +9,8 @@ from typing import Any, Callable, Coroutine
 
 from aiohttp import WSMessage, WSMsgType, web
 
-from .header import WebRequestData, WebResponseData, encode_header, parse_header
+from remote_esphome.header import WebRequestData, WebResponseData, encode_header, parse_header
+import remote_esphome.local_logging as logging
 
 PROXY_PORT = 6052
 TUNNEL_PORT = 7070
@@ -192,7 +191,7 @@ class TunnelAcceptor:
                 chan_logger.warning("Sending data to aborted channel")
                 raise ConnectionAbortedError()
 
-            chan_logger.debug(f"Sending data (len={len(data)})")
+            chan_logger.trace(f"Sending data (len={len(data)})")
             await self._outbound_queue.put((channel_num, data))
 
         async def _recv() -> bytes:
@@ -232,7 +231,7 @@ class TunnelAcceptor:
 
                 # Send the request
                 for k, v in request.headers.items():
-                    channel.logger.debug(f"> {k}: {v}")
+                    channel.logger.trace(f"> {k}: {v}")
                 request_data = WebRequestData(
                     request.method,
                     str(request.url),
@@ -307,7 +306,7 @@ class TunnelAcceptor:
         resp.set_status(resp_header.status)
         resp.headers.add("X-Tunnel-Up", "true")
         for k, v in resp_header.headers.items():
-            channel.logger.debug(f"< {k}: {v}")
+            channel.logger.trace(f"< {k}: {v}")
             resp.headers.add(k, v)
         await resp.prepare(request)
 
