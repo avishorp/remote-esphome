@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import pickle
 import re
 import sys
@@ -9,11 +8,12 @@ from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from aiohttp import ClientSession, WSMsgType
+from aiohttp import ClientSession, WSMsgType, ClientConnectionError
 from multidict import CIMultiDict
 
 from .file_sync_service import FileSyncService
 from .header import WebRequestData, WebResponseData, encode_header, parse_header
+import remote_esphome.local_logging as logging
 
 _logger = logging.getLogger("initiator")
 
@@ -112,7 +112,7 @@ class TunnelInitiator:
                                 chan_logger: logging.Logger,
                                 data: bytes,
                             ) -> None:
-                                chan_logger.debug(f"Sending data (len={len(data)})")
+                                chan_logger.trace(f"Sending data (len={len(data)})")
                                 await self._outbound_queue.put((channel_num, data))
 
                             async def _recv(
@@ -123,7 +123,7 @@ class TunnelInitiator:
                                     chan_logger.debug(f"Exception received: {data!s}")
                                     raise data
 
-                                chan_logger.debug(f"Data received (len={len(data)})")
+                                chan_logger.trace(f"Data received (len={len(data)})")
 
                                 return data
 
@@ -213,7 +213,7 @@ class TunnelInitiator:
                     data = await channel.recv()
                     if len(data) == 0:
                         return
-                    chan_logger.debug(f"Forwarding request data len={len(data)}")
+                    chan_logger.trace(f"Forwarding request data len={len(data)}")
                     yield data
             except (ConnectionAbortedError, ConnectionResetError):
                 pass
@@ -222,7 +222,7 @@ class TunnelInitiator:
         url = self._rewrite_url(request_data.url)
         chan_logger.debug(f"Issuing a {request_data.method} request to {url}")
         for k, v in request_data.headers.items():
-            chan_logger.debug(f"> {k}: {v}")
+            chan_logger.trace(f"> {k}: {v}")
 
         try:
             async with self._session.request(
@@ -234,7 +234,7 @@ class TunnelInitiator:
                 # Send the response back to the request initiator
                 chan_logger.debug(f"Got response with status {resp.status}")
                 for k, v in resp.headers.items():
-                    chan_logger.debug(f"< {k}: {v}")
+                    chan_logger.trace(f"< {k}: {v}")
 
                 resp_data = WebResponseData(resp.status, resp.headers.copy())
                 await channel.send(pickle.dumps(resp_data))
@@ -261,7 +261,7 @@ class TunnelInitiator:
         url = self._rewrite_url(request_data.url)
         chan_logger.debug(f"Issuing a WebSocket request to {url}")
         for k, v in request_data.headers.items():
-            chan_logger.debug(f"> {k}: {v}")
+            chan_logger.trace(f"> {k}: {v}")
 
         async with self._session.ws_connect(
             url,
@@ -314,11 +314,17 @@ async def run_initiator(target_url: str, workdir: Path) -> None:
         try:
             esphome_dir = workdir / "esphome"
             logging.info(f"Using {esphome_dir} as ESPHome dashbord config dir")
+            if not esphome_dir.exists():
+                logging.info("Creating working directory")
+                esphome_dir.mkdir(parents=True)
+
             async with (
                 TunnelInitiator(
                     target_url + "/tunnel", f"localhost:{esphome_port}"
                 ) as esphome_finished,
-                FileSyncService(esphome_dir, target_url, re.compile(r"\.esphome/build/.*")),
+                FileSyncService(
+                    esphome_dir, target_url, re.compile(r"\.esphome/build/.*")
+                ),
             ):
                 # Run ESPHome
                 esphome_proc = await asyncio.subprocess.create_subprocess_exec(
@@ -341,6 +347,9 @@ async def run_initiator(target_url: str, workdir: Path) -> None:
                 elif esphome_proc.returncode != 0:
                     msg = f"ESPHome terminated with non-zero ({esphome_proc.returncode}) exit code"
                     raise RuntimeError(msg)
+
+        except ClientConnectionError:
+            logging.warning("Failed connecting the addon")
 
         except Exception as exc:
             logging.exception(f"Terminated with exception: {exc!s}")
