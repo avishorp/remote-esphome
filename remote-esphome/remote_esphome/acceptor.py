@@ -2,23 +2,24 @@ import asyncio
 import hashlib
 import http
 import pickle
+import time
+import urllib.parse
+from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Coroutine
 
 from aiohttp import WSMessage, WSMsgType, web
 
-from remote_esphome.header import WebRequestData, WebResponseData, encode_header, parse_header
 import remote_esphome.local_logging as logging
+from remote_esphome.header import WebRequestData, WebResponseData, encode_header, parse_header
 
-PROXY_PORT = 6052
-TUNNEL_PORT = 7070
 _STATIC_DIR = Path(__file__).parent / "static"
-_DEFUALT_HTML = _STATIC_DIR / "default.html"
+_STATIC_URL_PREFIX = "/__local"
+_STATUS_URL_PREFIX = "/__status"
 
 
-class TunnelDownException(Exception):
+class TunnelDownError(Exception):
     pass
 
 
@@ -52,18 +53,19 @@ class TunnelAcceptor:
         self._on_connect = on_connect
         self._state_dir = state_dir
         self._esphome_dir = state_dir / "esphome"
+        self._tunnel_up_since = 0
 
-    async def start(self):
+    async def start(self) -> None:
         self._srv_task = asyncio.create_task(self._start())
 
-    async def stop(self):
+    async def stop(self) -> None:
         assert self._srv_task is not None
         self._srv_task.cancel()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> None:
         await self.start()
 
-    async def __aexit__(self, exc_type: Any, exc_value: Any, exc_tb: Any) -> None:
+    async def __aexit__(self, exc_type: object, exc_value: object, exc_tb: object) -> None:
         await self.stop()
 
     async def _start(self) -> None:
@@ -96,7 +98,8 @@ class TunnelAcceptor:
         app = web.Application()
         app.add_routes(
             [
-                web.static("/__local", _STATIC_DIR),
+                web.static(_STATIC_URL_PREFIX, _STATIC_DIR),
+                web.get(_STATUS_URL_PREFIX, self._handle_status_request),
                 web.route("*", "/{tail:.*}", self._handle_proxy_request),
             ]
         )
@@ -128,6 +131,7 @@ class TunnelAcceptor:
 
             # Create an outbound queue
             self._outbound_queue = asyncio.Queue[tuple[int, bytes]]()
+            self._tunnel_up_since = time.time()
 
             async def _recv_to_queue():
                 async for msg in ws:
@@ -173,7 +177,7 @@ class TunnelAcceptor:
     @asynccontextmanager
     async def _create_channel(self):
         if self._outbound_queue is None:
-            raise TunnelDownException()
+            raise TunnelDownError()
 
         # Assign a new number to the channel
         self._last_channel_num += 1
@@ -218,7 +222,7 @@ class TunnelAcceptor:
         # Cleanup
         del self._active_channels[channel_num]
 
-    async def _handle_proxy_request(self, request: web.Request):
+    async def _handle_proxy_request(self, request: web.Request) -> web.StreamResponse:
         is_websocket = (
             request.headers.get("Upgrade", "").lower() == "websocket"
             and request.headers.get("Connection", "").lower() == "upgrade"
@@ -267,21 +271,28 @@ class TunnelAcceptor:
 
             return resp
 
-        except TunnelDownException:
+        except TunnelDownError:
             # When the tunnel is down, fallback to a static predefined
             # content
-            resp = web.StreamResponse()
-            resp.headers.add("X-Tunnel-Up", "false")
-            await resp.prepare(request)
-            await resp.write("Tunnel is down".encode())
+            source_quoted = urllib.parse.quote(request.url.path_qs, safe="")
+            redirect_url = f"{_STATIC_URL_PREFIX}/index.html?sourceUrl={source_quoted}"
+            raise web.HTTPFound(redirect_url) from None
 
         except (ConnectionAbortedError, ConnectionResetError):
             pass
 
         return resp
 
-    async def _relay_plain_body(self, channel: Channel, request: web.Request):
-        async def request_data_to_tunnel():
+    async def _handle_status_request(self, _: web.Request) -> web.Response:
+        status = {
+            "tunnelUp": self._outbound_queue is not None,
+            "tunnelUptime": time.time() - self._tunnel_up_since if self._outbound_queue is not None else None
+            }
+
+        return web.json_response(status)
+
+    async def _relay_plain_body(self, channel: Channel, request: web.Request) -> web.StreamResponse:
+        async def request_data_to_tunnel() -> None:
             # Stream request data to the tunnel
             try:
                 while True:
@@ -300,7 +311,7 @@ class TunnelAcceptor:
         resp_header = pickle.loads(resp_header_raw)
         if not isinstance(resp_header, WebResponseData):
             self._proxy_logger.error("Unexpected response from remote side")
-            raise web.HTTPInternalServerError()
+            raise web.HTTPInternalServerError
 
         resp = web.StreamResponse()
         resp.set_status(resp_header.status)
