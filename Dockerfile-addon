@@ -1,8 +1,3 @@
-# Build these with the build.py script
-# Example:
-#   python3 docker/build.py --tag dev --arch amd64 --build-type docker build
-
-# One of "docker", "hassio"
 ARG BASEIMGTYPE=docker
 
 
