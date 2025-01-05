@@ -121,14 +121,13 @@ EXPOSE 6062
 EXPOSE 6063
 
 # The directory the user should mount their configuration files to
-VOLUME /config
-WORKDIR /config
+WORKDIR /data
 
 # Set entrypoint to esphome (via a script) so that the user doesn't have to type 'esphome'
 # in every docker command twice
 ENTRYPOINT ["/remote-esphome/bin/python3", "-m", "remote_esphome", "addon"]
 # When no arguments given, start the dashboard in the workdir
-CMD ["6062", "6063", "/config"]
+CMD ["6062", "6063", "/data"]
 
 
 ARG BUILD_VERSION=dev
