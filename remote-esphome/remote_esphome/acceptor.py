@@ -275,7 +275,8 @@ class TunnelAcceptor:
             # When the tunnel is down, fallback to a static predefined
             # content
             source_quoted = urllib.parse.quote(request.url.path_qs, safe="")
-            redirect_url = f"{_STATIC_URL_PREFIX}/index.html?sourceUrl={source_quoted}"
+            ingress_prefix = request.headers.get("X-Ingress-Path", "")
+            redirect_url = f"{ingress_prefix}{_STATIC_URL_PREFIX}/index.html?sourceUrl={source_quoted}"
             raise web.HTTPFound(redirect_url) from None
 
         except (ConnectionAbortedError, ConnectionResetError):
